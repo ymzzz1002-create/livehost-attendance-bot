@@ -43,8 +43,8 @@ def tg_send(chat_id, text, keyboard=True):
                     {"text": "🔴 下班", "callback_data": "check_out"}
                 ],
                 [
-                    {"text": "📅 今日統計", "callback_data": "today_stats"},
-                    {"text": "📆 本月統計", "callback_data": "month_stats"}
+                    {"text": "👥 今日直播主", "callback_data": "today_all"},
+                    {"text": "📊 本月直播主", "callback_data": "month_all"}
                 ]
             ]
         }
