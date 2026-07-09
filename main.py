@@ -1,340 +1,242 @@
+import discord
+from discord.ext import commands
+from discord import app_commands
 import os
-import requests
-from datetime import datetime, timedelta, date
-from flask import Flask, request
+import json
+from datetime import datetime, timedelta, timezone
 
-BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip().replace("/rest/v1", "").rstrip("/")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY", "").strip()
+TOKEN = os.getenv("DISCORD_TOKEN")
 
-WEBHOOK_URL = "https://livehost-attendance-bot.onrender.com"
-TIMEZONE_OFFSET = 8
+intents = discord.Intents.default()
+intents.message_content = True
+bot = commands.Bot(command_prefix="!", intents=intents)
 
-app = Flask(__name__)
-SUPABASE_REST = f"{SUPABASE_URL}/rest/v1/attendance"
+DATA_FILE = "attendance.json"
+TZ = timezone(timedelta(hours=8))
 
 
-def now_tw():
-    return datetime.utcnow() + timedelta(hours=TIMEZONE_OFFSET)
+def now():
+    return datetime.now(TZ)
 
 
-def today_tw():
-    return now_tw().date().isoformat()
+def load_data():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    with open(DATA_FILE, "r", encoding="utf-8") as f:
+        return json.load(f)
 
 
-def sb_headers():
-    return {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
+def save_data(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
 
 
-def tg_send(chat_id, text, keyboard=True):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": chat_id, "text": text}
-
-    if keyboard:
-        data["reply_markup"] = {
-            "inline_keyboard": [
-                [
-                    {"text": "🟢 上班", "callback_data": "check_in"},
-                    {"text": "🔴 下班", "callback_data": "check_out"}
-                ],
-                [
-                    {"text": "👥 今日直播主", "callback_data": "today_all"},
-                    {"text": "📊 本月直播主", "callback_data": "month_all"}
-                ]
-            ]
-        }
-
-    r = requests.post(url, json=data, timeout=15)
-    print("TG SEND STATUS:", r.status_code)
-    print("TG SEND RESPONSE:", r.text)
+def fmt_duration(seconds):
+    seconds = int(seconds)
+    hours = seconds // 3600
+    minutes = (seconds % 3600) // 60
+    return f"{hours}小時{minutes}分"
 
 
-def tg_answer_callback(callback_id):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-    r = requests.post(url, json={"callback_query_id": callback_id}, timeout=15)
-    print("TG CALLBACK STATUS:", r.status_code)
+class AttendanceView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(label="我要上班", style=discord.ButtonStyle.success, custom_id="clock_in")
+    async def clock_in(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        user_id = str(interaction.user.id)
+        user_name = interaction.user.display_name
+        today = now().strftime("%Y-%m-%d")
+
+        data.setdefault(user_id, {
+            "name": user_name,
+            "records": {}
+        })
+
+        data[user_id]["name"] = user_name
+        data[user_id]["records"].setdefault(today, {
+            "clock_in": None,
+            "clock_out": None,
+            "total_seconds": 0
+        })
+
+        record = data[user_id]["records"][today]
+
+        if record["clock_in"] and not record["clock_out"]:
+            await interaction.response.send_message(
+                f"⚠️ {user_name} 你今天已經上班中了，不用重複按。",
+                ephemeral=True
+            )
+            return
+
+        record["clock_in"] = now().isoformat()
+        record["clock_out"] = None
+
+        save_data(data)
+
+        await interaction.response.send_message(
+            f"✅ {user_name} 已上班\n時間：{now().strftime('%H:%M')}"
+        )
+
+    @discord.ui.button(label="我要下班", style=discord.ButtonStyle.danger, custom_id="clock_out")
+    async def clock_out(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        user_id = str(interaction.user.id)
+        user_name = interaction.user.display_name
+        today = now().strftime("%Y-%m-%d")
+
+        if user_id not in data or today not in data[user_id]["records"]:
+            await interaction.response.send_message(
+                f"⚠️ {user_name} 你今天還沒有按上班。",
+                ephemeral=True
+            )
+            return
+
+        record = data[user_id]["records"][today]
+
+        if not record["clock_in"]:
+            await interaction.response.send_message(
+                f"⚠️ {user_name} 你今天還沒有按上班。",
+                ephemeral=True
+            )
+            return
+
+        if record["clock_out"]:
+            await interaction.response.send_message(
+                f"⚠️ {user_name} 你今天已經下班了。",
+                ephemeral=True
+            )
+            return
+
+        clock_in_time = datetime.fromisoformat(record["clock_in"])
+        clock_out_time = now()
+
+        work_seconds = (clock_out_time - clock_in_time).total_seconds()
+        record["clock_out"] = clock_out_time.isoformat()
+        record["total_seconds"] = int(record.get("total_seconds", 0) + work_seconds)
+
+        save_data(data)
+
+        await interaction.response.send_message(
+            f"🏠 {user_name} 已下班\n"
+            f"時間：{clock_out_time.strftime('%H:%M')}\n"
+            f"今日工時：{fmt_duration(record['total_seconds'])}"
+        )
+
+    @discord.ui.button(label="今日狀態", style=discord.ButtonStyle.primary, custom_id="today_status")
+    async def today_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        today = now().strftime("%Y-%m-%d")
+
+        lines = [f"📋 今日狀態｜{today}\n"]
+
+        has_record = False
+
+        for user_id, user_data in data.items():
+            name = user_data.get("name", "未知成員")
+            record = user_data.get("records", {}).get(today)
+
+            if not record:
+                continue
+
+            has_record = True
+
+            clock_in = record.get("clock_in")
+            clock_out = record.get("clock_out")
+            total_seconds = int(record.get("total_seconds", 0))
+
+            if clock_in and not clock_out:
+                clock_in_time = datetime.fromisoformat(clock_in)
+                current_seconds = (now() - clock_in_time).total_seconds()
+                work_text = fmt_duration(current_seconds)
+                status = "🟢 上班中"
+                out_text = "尚未下班"
+            elif clock_in and clock_out:
+                work_text = fmt_duration(total_seconds)
+                status = "✅ 已下班"
+                out_text = datetime.fromisoformat(clock_out).strftime("%H:%M")
+            else:
+                continue
+
+            in_text = datetime.fromisoformat(clock_in).strftime("%H:%M")
+
+            lines.append(
+                f"👤 {name}\n"
+                f"狀態：{status}\n"
+                f"上班：{in_text}\n"
+                f"下班：{out_text}\n"
+                f"今日工時：{work_text}\n"
+            )
+
+        if not has_record:
+            lines.append("目前今天還沒有人按上班。")
+
+        await interaction.response.send_message("\n".join(lines))
+
+    @discord.ui.button(label="本月統計", style=discord.ButtonStyle.secondary, custom_id="month_status")
+    async def month_status(self, interaction: discord.Interaction, button: discord.ui.Button):
+        data = load_data()
+        current_month = now().strftime("%Y-%m")
+
+        lines = [f"📊 本月統計｜{current_month}\n"]
+
+        has_record = False
+
+        for user_id, user_data in data.items():
+            name = user_data.get("name", "未知成員")
+            records = user_data.get("records", {})
+
+            total_seconds = 0
+            work_days = 0
+
+            for date, record in records.items():
+                if not date.startswith(current_month):
+                    continue
+
+                day_seconds = int(record.get("total_seconds", 0))
+
+                if record.get("clock_in") and not record.get("clock_out"):
+                    clock_in_time = datetime.fromisoformat(record["clock_in"])
+                    day_seconds += int((now() - clock_in_time).total_seconds())
+
+                if record.get("clock_in"):
+                    work_days += 1
+
+                total_seconds += day_seconds
+
+            if work_days > 0:
+                has_record = True
+                lines.append(
+                    f"👤 {name}\n"
+                    f"出勤天數：{work_days}天\n"
+                    f"本月工時：{fmt_duration(total_seconds)}\n"
+                )
+
+        if not has_record:
+            lines.append("目前本月還沒有任何出勤紀錄。")
+
+        await interaction.response.send_message("\n".join(lines))
 
 
-def get_name(user):
-    return user.get("first_name") or user.get("username") or "未知人員"
-
-
-def sb_get(params):
-    print("SUPABASE GET PARAMS:", params)
-    r = requests.get(SUPABASE_REST, headers=sb_headers(), params=params, timeout=20)
-    print("GET STATUS:", r.status_code)
-    print("GET RESPONSE:", r.text)
+@bot.event
+async def on_ready():
+    bot.add_view(AttendanceView())
     try:
-        return r.json()
-    except Exception:
-        return []
-
-
-def sb_insert(data):
-    print("SUPABASE INSERT DATA:", data)
-    r = requests.post(SUPABASE_REST, headers=sb_headers(), json=data, timeout=20)
-    print("INSERT STATUS:", r.status_code)
-    print("INSERT RESPONSE:", r.text)
-    try:
-        return r.json()
-    except Exception:
-        return []
-
-
-def sb_patch(row_id, data):
-    url = f"{SUPABASE_REST}?id=eq.{row_id}"
-    print("SUPABASE PATCH URL:", url)
-    print("SUPABASE PATCH DATA:", data)
-    r = requests.patch(url, headers=sb_headers(), json=data, timeout=20)
-    print("PATCH STATUS:", r.status_code)
-    print("PATCH RESPONSE:", r.text)
-    try:
-        return r.json()
-    except Exception:
-        return []
-
-
-def parse_db_time(value):
-    if not value:
-        return None
-    try:
-        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return dt.replace(tzinfo=None)
+        synced = await bot.tree.sync()
+        print(f"已同步 {len(synced)} 個指令")
     except Exception as e:
-        print("PARSE TIME ERROR:", e)
-        return None
+        print(e)
+
+    print(f"機器人已登入：{bot.user}")
 
 
-def check_in(chat_id, user):
-    user_id = str(user["id"])
-    user_name = get_name(user)
-    work_date = today_tw()
-    now = now_tw()
-
-    print("CHECK IN USER:", user_id, user_name, work_date, now.isoformat())
-
-    rows = sb_get({
-        "user_id": f"eq.{user_id}",
-        "work_date": f"eq.{work_date}",
-        "check_out": "is.null",
-        "select": "*"
-    })
-
-    if rows:
-        tg_send(chat_id, "⚠️ 你今天已經上班打卡了，不能重複打卡。")
-        return
-
-    result = sb_insert({
-        "user_id": user_id,
-        "user_name": user_name,
-        "work_date": work_date,
-        "check_in": now.isoformat(),
-        "check_out": None,
-        "work_hours": 0,
-        "status": "上班"
-    })
-
-    print("CHECK IN INSERT RESULT:", result)
-
-    tg_send(
-        chat_id,
-        f"🟢 上班打卡成功\n\n"
-        f"👤 {user_name}\n"
-        f"⏰ {now.strftime('%Y-%m-%d %H:%M:%S')}"
+@bot.tree.command(name="簽到面板", description="建立上班下班簽到面板")
+async def attendance_panel(interaction: discord.Interaction):
+    await interaction.response.send_message(
+        "📌 簽到系統\n\n請選擇要執行的操作：",
+        view=AttendanceView()
     )
 
 
-def check_out(chat_id, user):
-    user_id = str(user["id"])
-    user_name = get_name(user)
-    work_date = today_tw()
-    now = now_tw()
-
-    print("CHECK OUT USER:", user_id, user_name, work_date, now.isoformat())
-
-    rows = sb_get({
-        "user_id": f"eq.{user_id}",
-        "work_date": f"eq.{work_date}",
-        "check_out": "is.null",
-        "select": "*",
-        "order": "check_in.desc",
-        "limit": "1"
-    })
-
-    if not rows:
-        tg_send(chat_id, "⚠️ 找不到今天尚未下班的上班紀錄。\n\n請先按「今日統計」確認今天是否有上班紀錄。")
-        return
-
-    row = rows[0]
-    check_in_time = parse_db_time(row.get("check_in"))
-
-    if not check_in_time:
-        tg_send(chat_id, "⚠️ 這筆上班紀錄時間異常，請檢查資料表。")
-        return
-
-    work_hours = round((now - check_in_time).total_seconds() / 3600, 2)
-
-    result = sb_patch(row["id"], {
-        "check_out": now.isoformat(),
-        "work_hours": work_hours,
-        "status": "下班"
-    })
-
-    print("CHECK OUT PATCH RESULT:", result)
-
-    tg_send(
-        chat_id,
-        f"🔴 下班打卡成功\n\n"
-        f"👤 {user_name}\n"
-        f"⏰ 下班時間：{now.strftime('%Y-%m-%d %H:%M:%S')}\n"
-        f"🕒 今日工時：{work_hours} 小時"
-    )
-
-
-def today_stats(chat_id, user):
-    user_id = str(user["id"])
-    work_date = today_tw()
-
-    rows = sb_get({
-        "user_id": f"eq.{user_id}",
-        "work_date": f"eq.{work_date}",
-        "select": "*",
-        "order": "check_in.asc"
-    })
-
-    if not rows:
-        tg_send(chat_id, "📅 今日統計\n\n今天還沒有打卡紀錄。")
-        return
-
-    text = "📅 今日統計\n\n"
-    total = 0
-
-    for row in rows:
-        ci = row.get("check_in")
-        co = row.get("check_out")
-        hours = row.get("work_hours") or 0
-        total += float(hours)
-
-        ci_txt = ci[11:16] if ci else "--:--"
-        co_txt = co[11:16] if co else "尚未下班"
-
-        text += f"🟢 {ci_txt} ～ 🔴 {co_txt}"
-        if hours:
-            text += f"（{hours} 小時）"
-        text += "\n"
-
-    text += f"\n🕒 今日總工時：{round(total, 2)} 小時"
-    tg_send(chat_id, text)
-
-
-def month_stats(chat_id, user):
-    user_id = str(user["id"])
-    now = now_tw()
-
-    first_day = date(now.year, now.month, 1).isoformat()
-
-    rows = sb_get({
-        "user_id": f"eq.{user_id}",
-        "work_date": f"gte.{first_day}",
-        "select": "*",
-        "order": "work_date.asc"
-    })
-
-    rows = [
-        row for row in rows
-        if str(row.get("work_date", "")).startswith(f"{now.year}-{now.month:02d}")
-    ]
-
-    if not rows:
-        tg_send(chat_id, "📆 本月統計\n\n本月還沒有打卡紀錄。")
-        return
-
-    total_hours = 0
-    work_days = set()
-    detail = ""
-
-    for row in rows:
-        work_days.add(row["work_date"])
-        hours = row.get("work_hours") or 0
-        total_hours += float(hours)
-
-        ci = row.get("check_in")
-        co = row.get("check_out")
-
-        ci_txt = ci[11:16] if ci else "--:--"
-        co_txt = co[11:16] if co else "尚未下班"
-
-        detail += f"{row['work_date']}　{ci_txt}～{co_txt}"
-        if hours:
-            detail += f"（{hours} 小時）"
-        detail += "\n"
-
-    avg = round(total_hours / len(work_days), 2) if work_days else 0
-
-    text = (
-        f"📆 本月統計\n\n"
-        f"🗓 出勤天數：{len(work_days)} 天\n"
-        f"🕒 本月總工時：{round(total_hours, 2)} 小時\n"
-        f"📈 平均每日工時：{avg} 小時\n\n"
-        f"本月明細：\n{detail}"
-    )
-
-    tg_send(chat_id, text)
-
-
-@app.route("/", methods=["GET"])
-def home():
-    return "Bot is running"
-
-
-@app.route("/webhook", methods=["POST"])
-def webhook():
-    update = request.get_json() or {}
-    print("UPDATE RECEIVED:", update)
-
-    if "callback_query" in update:
-        callback = update["callback_query"]
-        tg_answer_callback(callback["id"])
-
-        data = callback["data"]
-        user = callback["from"]
-        chat_id = callback["message"]["chat"]["id"]
-
-        print("CALLBACK DATA:", data)
-        print("CALLBACK USER:", user)
-        print("CHAT ID:", chat_id)
-
-        if data == "check_in":
-            check_in(chat_id, user)
-        elif data == "check_out":
-            check_out(chat_id, user)
-        elif data == "today_stats":
-            today_stats(chat_id, user)
-        elif data == "month_stats":
-            month_stats(chat_id, user)
-
-    elif "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        tg_send(chat_id, "請選擇打卡功能：")
-
-    return "ok"
-
-
-@app.route("/set_webhook", methods=["GET"])
-def set_webhook():
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
-    r = requests.get(url, params={"url": f"{WEBHOOK_URL}/webhook"}, timeout=20)
-    print("SET WEBHOOK STATUS:", r.status_code)
-    print("SET WEBHOOK RESPONSE:", r.text)
-    return r.text
-
-
-if __name__ == "__main__":
-    port = int(os.getenv("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+bot.run(TOKEN)
