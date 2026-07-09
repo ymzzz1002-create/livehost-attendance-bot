@@ -49,12 +49,15 @@ def tg_send(chat_id, text, keyboard=True):
             ]
         }
 
-    requests.post(url, json=data, timeout=15)
+    r = requests.post(url, json=data, timeout=15)
+    print("TG SEND STATUS:", r.status_code)
+    print("TG SEND RESPONSE:", r.text)
 
 
 def tg_answer_callback(callback_id):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerCallbackQuery"
-    requests.post(url, json={"callback_query_id": callback_id}, timeout=15)
+    r = requests.post(url, json={"callback_query_id": callback_id}, timeout=15)
+    print("TG CALLBACK STATUS:", r.status_code)
 
 
 def get_name(user):
@@ -62,7 +65,10 @@ def get_name(user):
 
 
 def sb_get(params):
+    print("SUPABASE GET PARAMS:", params)
     r = requests.get(SUPABASE_REST, headers=sb_headers(), params=params, timeout=20)
+    print("GET STATUS:", r.status_code)
+    print("GET RESPONSE:", r.text)
     try:
         return r.json()
     except Exception:
@@ -70,7 +76,10 @@ def sb_get(params):
 
 
 def sb_insert(data):
+    print("SUPABASE INSERT DATA:", data)
     r = requests.post(SUPABASE_REST, headers=sb_headers(), json=data, timeout=20)
+    print("INSERT STATUS:", r.status_code)
+    print("INSERT RESPONSE:", r.text)
     try:
         return r.json()
     except Exception:
@@ -79,7 +88,11 @@ def sb_insert(data):
 
 def sb_patch(row_id, data):
     url = f"{SUPABASE_REST}?id=eq.{row_id}"
+    print("SUPABASE PATCH URL:", url)
+    print("SUPABASE PATCH DATA:", data)
     r = requests.patch(url, headers=sb_headers(), json=data, timeout=20)
+    print("PATCH STATUS:", r.status_code)
+    print("PATCH RESPONSE:", r.text)
     try:
         return r.json()
     except Exception:
@@ -92,7 +105,8 @@ def parse_db_time(value):
     try:
         dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return dt.replace(tzinfo=None)
-    except Exception:
+    except Exception as e:
+        print("PARSE TIME ERROR:", e)
         return None
 
 
@@ -101,6 +115,8 @@ def check_in(chat_id, user):
     user_name = get_name(user)
     work_date = today_tw()
     now = now_tw()
+
+    print("CHECK IN USER:", user_id, user_name, work_date, now.isoformat())
 
     rows = sb_get({
         "user_id": f"eq.{user_id}",
@@ -123,6 +139,8 @@ def check_in(chat_id, user):
         "status": "上班"
     })
 
+    print("CHECK IN INSERT RESULT:", result)
+
     tg_send(
         chat_id,
         f"🟢 上班打卡成功\n\n"
@@ -136,6 +154,8 @@ def check_out(chat_id, user):
     user_name = get_name(user)
     work_date = today_tw()
     now = now_tw()
+
+    print("CHECK OUT USER:", user_id, user_name, work_date, now.isoformat())
 
     rows = sb_get({
         "user_id": f"eq.{user_id}",
@@ -159,11 +179,13 @@ def check_out(chat_id, user):
 
     work_hours = round((now - check_in_time).total_seconds() / 3600, 2)
 
-    sb_patch(row["id"], {
+    result = sb_patch(row["id"], {
         "check_out": now.isoformat(),
         "work_hours": work_hours,
         "status": "下班"
     })
+
+    print("CHECK OUT PATCH RESULT:", result)
 
     tg_send(
         chat_id,
@@ -273,6 +295,7 @@ def home():
 @app.route("/webhook", methods=["POST"])
 def webhook():
     update = request.get_json() or {}
+    print("UPDATE RECEIVED:", update)
 
     if "callback_query" in update:
         callback = update["callback_query"]
@@ -281,6 +304,10 @@ def webhook():
         data = callback["data"]
         user = callback["from"]
         chat_id = callback["message"]["chat"]["id"]
+
+        print("CALLBACK DATA:", data)
+        print("CALLBACK USER:", user)
+        print("CHAT ID:", chat_id)
 
         if data == "check_in":
             check_in(chat_id, user)
@@ -303,6 +330,8 @@ def webhook():
 def set_webhook():
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/setWebhook"
     r = requests.get(url, params={"url": f"{WEBHOOK_URL}/webhook"}, timeout=20)
+    print("SET WEBHOOK STATUS:", r.status_code)
+    print("SET WEBHOOK RESPONSE:", r.text)
     return r.text
 
 
