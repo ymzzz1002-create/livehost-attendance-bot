@@ -40,8 +40,8 @@ def get_keyboard():
             InlineKeyboardButton("🏠 我要下班", callback_data="clock_out"),
         ],
         [
-            InlineKeyboardButton("📋 今日狀態", callback_data="today_status"),
-            InlineKeyboardButton("📊 本月統計", callback_data="month_status"),
+            InlineKeyboardButton("📋 今日直播主", callback_data="today_status"),
+            InlineKeyboardButton("📊 本月直播主", callback_data="month_status"),
         ]
     ])
 
