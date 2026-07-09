@@ -11,7 +11,6 @@ WEBHOOK_URL = "https://livehost-attendance-bot.onrender.com"
 TIMEZONE_OFFSET = 8
 
 app = Flask(__name__)
-
 SUPABASE_REST = f"{SUPABASE_URL}/rest/v1/attendance"
 
 
@@ -34,11 +33,7 @@ def sb_headers():
 
 def tg_send(chat_id, text, keyboard=True):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
-    data = {
-        "chat_id": chat_id,
-        "text": text
-    }
+    data = {"chat_id": chat_id, "text": text}
 
     if keyboard:
         data["reply_markup"] = {
@@ -94,9 +89,11 @@ def sb_patch(row_id, data):
 def parse_db_time(value):
     if not value:
         return None
-
-    dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    return dt.replace(tzinfo=None)
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        return dt.replace(tzinfo=None)
+    except Exception:
+        return None
 
 
 def check_in(chat_id, user):
@@ -116,11 +113,13 @@ def check_in(chat_id, user):
         tg_send(chat_id, "⚠️ 你今天已經上班打卡了，不能重複打卡。")
         return
 
-    sb_insert({
+    result = sb_insert({
         "user_id": user_id,
         "user_name": user_name,
         "work_date": work_date,
         "check_in": now.isoformat(),
+        "check_out": None,
+        "work_hours": 0,
         "status": "上班"
     })
 
@@ -148,7 +147,7 @@ def check_out(chat_id, user):
     })
 
     if not rows:
-        tg_send(chat_id, "⚠️ 找不到今天尚未下班的上班紀錄。")
+        tg_send(chat_id, "⚠️ 找不到今天尚未下班的上班紀錄。\n\n請先按「今日統計」確認今天是否有上班紀錄。")
         return
 
     row = rows[0]
@@ -215,20 +214,19 @@ def month_stats(chat_id, user):
     user_id = str(user["id"])
     now = now_tw()
 
-    first_day = date(now.year, now.month, 1)
-
-    if now.month == 12:
-        next_month = date(now.year + 1, 1, 1)
-    else:
-        next_month = date(now.year, now.month + 1, 1)
+    first_day = date(now.year, now.month, 1).isoformat()
 
     rows = sb_get({
         "user_id": f"eq.{user_id}",
-        "work_date": f"gte.{first_day.isoformat()}",
-        "work_date": f"lt.{next_month.isoformat()}",
+        "work_date": f"gte.{first_day}",
         "select": "*",
         "order": "work_date.asc"
     })
+
+    rows = [
+        row for row in rows
+        if str(row.get("work_date", "")).startswith(f"{now.year}-{now.month:02d}")
+    ]
 
     if not rows:
         tg_send(chat_id, "📆 本月統計\n\n本月還沒有打卡紀錄。")
